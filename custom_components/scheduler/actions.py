@@ -1,4 +1,5 @@
 import logging
+import re
 
 from homeassistant.core import (
     HomeAssistant,
@@ -36,6 +37,14 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+    floor_registry as fr,
+    label_registry as lr,
+)
+from homeassistant.helpers.debounce import Debouncer
 
 from . import const
 from .store import ScheduleEntry
@@ -44,6 +53,256 @@ _LOGGER = logging.getLogger(__name__)
 
 ACTION_WAIT = "wait"
 ACTION_WAIT_STATE_CHANGE = "wait_state_change"
+
+# entity registry changes that can affect target resolution
+ENTITY_REGISTRY_RELEVANT_CHANGES = {
+    "area_id",
+    "device_id",
+    "labels",
+    "entity_category",
+    "disabled_by",
+    "hidden_by",
+    "entity_id",
+}
+DEVICE_REGISTRY_RELEVANT_CHANGES = {"area_id", "labels"}
+AREA_REGISTRY_RELEVANT_CHANGES = {"floor_id", "labels"}
+
+
+def match_pattern(pattern: str, value: str) -> bool:
+    """mirror of the card's matchPattern (lib/patterns.ts):
+    - plain patterns: exact entity match, or domain match when the pattern
+      has no dot but the value does
+    - wildcard patterns ('*') and /regex/ patterns
+    """
+    if not value:
+        return False
+    if re.fullmatch(r"[a-z0-9_\.]+", pattern):
+        if "." not in pattern and "." in value:
+            return pattern == value.split(".")[0]
+        return pattern == value
+    try:
+        if pattern.startswith("/") and pattern.endswith("/"):
+            return re.search(pattern[1:-1], value) is not None
+        if "*" in pattern:
+            return re.search("^" + pattern.replace("*", ".*") + "$", value) is not None
+    except re.error:
+        pass
+    return False
+
+
+def entity_allowed_by_filter(entity_id: str, target_filter: dict | None) -> bool:
+    """apply a schedule's stored include/exclude patterns to an entity"""
+    if not target_filter:
+        return True
+    include = target_filter.get(const.ATTR_INCLUDE) or ["*"]
+    exclude = target_filter.get(const.ATTR_EXCLUDE) or []
+    if not any(match_pattern(pattern, entity_id) for pattern in include):
+        return False
+    if any(match_pattern(pattern, entity_id) for pattern in exclude):
+        return False
+    return True
+
+
+def target_is_dynamic(target: dict | None) -> bool:
+    """return True if the target contains device/area/floor/label references
+    whose entity membership can change over time"""
+    if not target:
+        return False
+    return any(target.get(key) for key in const.DYNAMIC_TARGET_KEYS)
+
+
+def resolve_target(hass: HomeAssistant, target: dict | None, domain: str = None, target_filter: dict = None) -> list:
+    """expand a HA-style target object into a list of concrete entity IDs.
+
+    Single source of truth for target resolution; called at execution time
+    (when a timeslot's actions are queued) and by the frontend preview
+    websocket command — never at save time, so schedules automatically pick
+    up entities that join a targeted device/area/floor/label later.
+
+    Mirrors HA's own service targeting semantics:
+    - explicit entity_ids are always included, unfiltered
+    - floor targets expand to their areas
+    - label targets expand to labeled areas, devices and entities
+    - area targets include entities assigned to the area directly, plus
+      entities of devices in the area that have no area override of their own
+    - device targets include all entities of the device
+    - indirectly referenced entities are skipped when disabled, hidden, or
+      config/diagnostic category, and filtered to the action's service domain
+    - indirectly referenced entities are additionally constrained by the
+      optional target_filter (include/exclude patterns stamped by the card
+      that created the schedule); explicitly picked entity_ids are exempt,
+      the picker already vetted those at selection time
+    """
+    if not target:
+        return []
+
+    entity_reg = er.async_get(hass)
+    device_reg = dr.async_get(hass)
+    area_reg = ar.async_get(hass)
+
+    def as_set(key):
+        value = target.get(key) or []
+        if isinstance(value, str):
+            value = [value]
+        return set(value)
+
+    explicit_entities = as_set(ATTR_ENTITY_ID)
+    device_ids = as_set(const.ATTR_DEVICE_ID)
+    area_ids = as_set(const.ATTR_AREA_ID)
+    floor_ids = as_set(const.ATTR_FLOOR_ID)
+    label_ids = as_set(const.ATTR_LABEL_ID)
+
+    # floors -> areas
+    if floor_ids:
+        for area in area_reg.areas.values():
+            if area.floor_id and area.floor_id in floor_ids:
+                area_ids.add(area.id)
+
+    # labels -> areas / devices
+    if label_ids:
+        for area in area_reg.areas.values():
+            if set(area.labels) & label_ids:
+                area_ids.add(area.id)
+        for device in device_reg.devices.values():
+            if set(device.labels) & label_ids:
+                device_ids.add(device.id)
+
+    # areas -> devices located in those areas
+    area_device_ids = set()
+    if area_ids:
+        for device in device_reg.devices.values():
+            if device.area_id and device.area_id in area_ids:
+                area_device_ids.add(device.id)
+
+    resolved = set(explicit_entities)
+
+    if device_ids or area_ids or area_device_ids or label_ids:
+        # skip domain filtering for services that are not tied to an entity
+        # domain (e.g. homeassistant.turn_off applies across domains)
+        filter_domain = domain if domain and domain != "homeassistant" else None
+
+        for entry in entity_reg.entities.values():
+            if (
+                entry.disabled
+                or entry.hidden_by is not None
+                or entry.entity_category is not None
+            ):
+                continue
+
+            include = False
+            if entry.device_id and entry.device_id in device_ids:
+                # explicitly targeted device (or label-selected device):
+                # all its entities are included regardless of area override
+                include = True
+            elif entry.area_id:
+                include = entry.area_id in area_ids
+            elif entry.device_id and entry.device_id in area_device_ids:
+                # entity inherits its device's area
+                include = True
+            if not include and label_ids and (set(entry.labels) & label_ids):
+                include = True
+
+            if not include:
+                continue
+            if filter_domain and entry.domain != filter_domain:
+                continue
+            if not entity_allowed_by_filter(entry.entity_id, target_filter):
+                continue
+            resolved.add(entry.entity_id)
+
+    return sorted(resolved)
+
+
+def expand_action_target(hass: HomeAssistant, action: dict) -> list:
+    """expand an action with a target object into per-entity action dicts,
+    ready for parse_service_call / per-entity action queues"""
+    base = {
+        key: value
+        for (key, value) in action.items()
+        if key not in [const.ATTR_TARGET, const.ATTR_TARGET_FILTER, ATTR_ENTITY_ID]
+    }
+    target = action.get(const.ATTR_TARGET)
+
+    # legacy action shape (flat entity_id, no target object)
+    if not target:
+        if action.get(ATTR_ENTITY_ID):
+            return [{**base, ATTR_ENTITY_ID: action[ATTR_ENTITY_ID]}]
+        return [base]
+
+    service = action.get(CONF_ACTION, action.get(CONF_SERVICE, ""))
+    domain = service.split(".").pop(0) if service else None
+    entities = resolve_target(hass, target, domain, action.get(const.ATTR_TARGET_FILTER))
+    if not entities:
+        _LOGGER.warning(
+            "Target {} of action {} resolved to no entities, skipping".format(
+                target, service
+            )
+        )
+        return []
+    return [{**base, ATTR_ENTITY_ID: entity} for entity in entities]
+
+
+@callback
+def async_setup_target_listener(hass: HomeAssistant):
+    """watch entity/device/area/floor/label registries and fire a debounced
+    dispatcher signal so schedules with dynamic targets can re-resolve.
+
+    Returns a callable that detaches all listeners."""
+
+    async def notify():
+        _LOGGER.debug("Registry changes detected, re-evaluating schedule targets")
+        async_dispatcher_send(hass, const.EVENT_TARGET_REGISTRY_UPDATED)
+
+    debouncer = Debouncer(
+        hass,
+        _LOGGER,
+        cooldown=const.TARGET_REGISTRY_UPDATE_DEBOUNCE,
+        immediate=False,
+        function=notify,
+    )
+
+    def relevant(event, tracked_changes) -> bool:
+        action = event.data.get("action")
+        if action in ("create", "remove"):
+            return True
+        if action == "update":
+            changes = event.data.get("changes", {})
+            return bool(set(changes) & tracked_changes)
+        return False
+
+    async def entity_registry_updated(event):
+        if relevant(event, ENTITY_REGISTRY_RELEVANT_CHANGES):
+            await debouncer.async_call()
+
+    async def device_registry_updated(event):
+        if relevant(event, DEVICE_REGISTRY_RELEVANT_CHANGES):
+            await debouncer.async_call()
+
+    async def area_registry_updated(event):
+        if relevant(event, AREA_REGISTRY_RELEVANT_CHANGES):
+            await debouncer.async_call()
+
+    async def grouping_registry_updated(event):
+        # floor/label removal cascades membership changes; create/rename
+        # cannot change membership, so only removal is relevant
+        if event.data.get("action") == "remove":
+            await debouncer.async_call()
+
+    unsubscribers = [
+        hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, entity_registry_updated),
+        hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, device_registry_updated),
+        hass.bus.async_listen(ar.EVENT_AREA_REGISTRY_UPDATED, area_registry_updated),
+        hass.bus.async_listen(fr.EVENT_FLOOR_REGISTRY_UPDATED, grouping_registry_updated),
+        hass.bus.async_listen(lr.EVENT_LABEL_REGISTRY_UPDATED, grouping_registry_updated),
+    ]
+
+    @callback
+    def detach():
+        while unsubscribers:
+            unsubscribers.pop()()
+        debouncer.async_cancel()
+
+    return detach
 
 
 def parse_service_call(data: dict):
@@ -243,7 +502,14 @@ class ActionHandler:
         await self.async_empty_queue()
 
         conditions = data[CONF_CONDITIONS]
-        actions = [e for x in data[const.ATTR_ACTIONS] for e in parse_service_call(x)]
+        # expand each action's target (entities/devices/areas/floors/labels)
+        # into concrete per-entity actions at execution time
+        actions = [
+            e
+            for x in data[const.ATTR_ACTIONS]
+            for expanded in expand_action_target(self.hass, x)
+            for e in parse_service_call(expanded)
+        ]
         condition_type = data[const.ATTR_CONDITION_TYPE]
         track_conditions = data[const.ATTR_TRACK_CONDITIONS]
 
