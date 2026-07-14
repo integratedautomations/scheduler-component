@@ -29,6 +29,7 @@ from homeassistant.helpers.event import (
 
 from . import const
 from .store import async_get_registry
+from .actions import async_setup_target_listener
 from .websockets import async_register_websockets
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     hass.data.setdefault(const.DOMAIN, {})
     hass.data[const.DOMAIN] = {"coordinator": coordinator, "schedules": {}}
+
+    # watch entity/device/area/floor/label registries so schedules with
+    # dynamic targets (areas/floors/labels/devices) re-resolve on changes
+    hass.data[const.DOMAIN]["target_listener"] = async_setup_target_listener(hass)
 
     if entry.unique_id is None:
         hass.config_entries.async_update_entry(entry, unique_id=coordinator.id)
@@ -203,6 +208,9 @@ async def async_unload_entry(hass, entry):
     )
     coordinator = hass.data[const.DOMAIN]["coordinator"]
     await coordinator.async_unload()
+    detach_target_listener = hass.data[const.DOMAIN].pop("target_listener", None)
+    if detach_target_listener:
+        detach_target_listener()
     return unload_ok
 
 
@@ -318,6 +326,10 @@ class SchedulerCoordinator(DataUpdateCoordinator):
             # if the name has been changed, the entity ID must change hence the entity should be destroyed
             entity_registry = get_entity_registry(self.hass)
             entity_registry.async_remove(entity.entity_id)
+            # the stale reference must be dropped before dispatching, else the
+            # duplicate guard in async_add_entity skips the re-creation and the
+            # schedule has no entity until the next restart/reload
+            self.hass.data[const.DOMAIN]["schedules"].pop(schedule_id, None)
             async_dispatcher_send(self.hass, const.EVENT_ITEM_CREATED, entry)
         else:
             async_dispatcher_send(self.hass, const.EVENT_ITEM_UPDATED, schedule_id)

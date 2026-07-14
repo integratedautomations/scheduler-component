@@ -10,6 +10,7 @@ from homeassistant.components.websocket_api import decorators, async_register_co
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from . import const
 from .store import ScheduleEntry
+from .actions import resolve_target
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +93,26 @@ def websocket_get_schedule_item(hass, connection, msg):
     item = msg[const.ATTR_SCHEDULE_ID]
     data = coordinator.async_get_schedule(item)
     connection.send_result(msg["id"], data)
+
+
+@callback
+def websocket_resolve_target(hass, connection, msg):
+    """resolve a HA-style target object into concrete entity IDs (preview).
+
+    Uses the same resolve_target() as schedule execution, so the preview
+    shown in the card matches what will run."""
+    try:
+        target = const.TARGET_SCHEMA(msg.get(const.ATTR_TARGET) or {})
+        target_filter = (
+            const.TARGET_FILTER_SCHEMA(msg[const.ATTR_TARGET_FILTER])
+            if msg.get(const.ATTR_TARGET_FILTER)
+            else None
+        )
+    except vol.Invalid as err:
+        connection.send_error(msg["id"], "invalid_format", str(err))
+        return
+    entities = resolve_target(hass, target, msg.get("domain"), target_filter)
+    connection.send_result(msg["id"], {"entities": entities})
 
 
 @callback
@@ -264,6 +285,21 @@ async def async_register_websockets(hass):
         websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
             {
                 vol.Required("type"): "{}/tags".format(const.DOMAIN),
+            }
+        ),
+    )
+
+    # resolve a target object into entity IDs (preview for the card editor)
+    websocket_api.async_register_command(
+        hass,
+        "{}/resolve_target".format(const.DOMAIN),
+        websocket_resolve_target,
+        websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+            {
+                vol.Required("type"): "{}/resolve_target".format(const.DOMAIN),
+                vol.Required(const.ATTR_TARGET): dict,
+                vol.Optional(const.ATTR_TARGET_FILTER): dict,
+                vol.Optional("domain"): cv.string,
             }
         ),
     )

@@ -33,7 +33,7 @@ from homeassistant.helpers.dispatcher import (
 from . import const
 from .store import ScheduleEntry, async_get_registry
 from .timer import TimerHandler
-from .actions import ActionHandler
+from .actions import ActionHandler, resolve_target, target_is_dynamic
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -133,7 +133,52 @@ class ScheduleEntity(ToggleEntity):
             async_dispatcher_connect(
                 self.hass, const.EVENT_TIMER_FINISHED, self.async_timer_finished
             ),
+            async_dispatcher_connect(
+                self.hass,
+                const.EVENT_TARGET_REGISTRY_UPDATED,
+                self.async_target_registry_updated,
+            ),
         ]
+
+    @callback
+    def _has_dynamic_target(self) -> bool:
+        """return True if any action targets devices/areas/floors/labels"""
+        if not self.schedule:
+            return False
+        return any(
+            target_is_dynamic(action.get(const.ATTR_TARGET))
+            for timeslot in self.schedule[const.ATTR_TIMESLOTS]
+            for action in timeslot[const.ATTR_ACTIONS]
+        )
+
+    @callback
+    async def async_target_registry_updated(self):
+        """re-resolve dynamic targets after registry changes (debounced).
+
+        Updates the resolved `entities` state attribute, and re-queues the
+        actions of the currently active timeslot so entities that newly
+        joined a targeted area/floor/label/device are brought into the
+        scheduled state (action_has_effect prevents redundant service calls
+        for entities that are already in the desired state)."""
+        if not self._has_dynamic_target():
+            return
+
+        if (
+            self._current_slot is not None
+            and self._state not in [STATE_OFF, STATE_UNAVAILABLE, const.STATE_COMPLETED]
+        ):
+            _LOGGER.debug(
+                "Schedule {} re-evaluating targets after registry change".format(
+                    self.schedule_id
+                )
+            )
+            await self._action_handler.async_queue_actions(
+                self.schedule[const.ATTR_TIMESLOTS][self._current_slot]
+            )
+
+        if self.hass is None:
+            return
+        self.async_write_ha_state()
 
     @callback
     async def async_item_updated(self, id: str):
@@ -351,15 +396,40 @@ class ScheduleEntity(ToggleEntity):
 
     @property
     def entities(self):
+        """resolved entity IDs targeted by this schedule (dynamic targets
+        are expanded via resolve_target at read time)"""
         entities = []
         if not self.schedule:
             return
         for timeslot in self.schedule[const.ATTR_TIMESLOTS]:
             for action in timeslot[const.ATTR_ACTIONS]:
-                if action[ATTR_ENTITY_ID] and action[ATTR_ENTITY_ID] not in entities:
+                service = action.get(CONF_SERVICE) or ""
+                domain = service.split(".")[0] if service else None
+                if action.get(const.ATTR_TARGET):
+                    for entity in resolve_target(
+                        self.hass, action[const.ATTR_TARGET], domain,
+                        action.get(const.ATTR_TARGET_FILTER)
+                    ):
+                        if entity not in entities:
+                            entities.append(entity)
+                # legacy flat entity_id (pre-v5 data not yet normalized)
+                elif action.get(ATTR_ENTITY_ID) and action[ATTR_ENTITY_ID] not in entities:
                     entities.append(action[ATTR_ENTITY_ID])
 
         return entities
+
+    @property
+    def targets(self):
+        """raw (unresolved) target objects of this schedule's actions"""
+        targets = []
+        if not self.schedule:
+            return
+        for timeslot in self.schedule[const.ATTR_TIMESLOTS]:
+            for action in timeslot[const.ATTR_ACTIONS]:
+                target = action.get(const.ATTR_TARGET)
+                if target and target not in targets:
+                    targets.append(target)
+        return targets
 
     @property
     def actions(self):
@@ -404,6 +474,7 @@ class ScheduleEntity(ToggleEntity):
             "weekdays": self.weekdays,
             "timeslots": self.timeslots,
             "entities": self.entities,
+            "targets": self.targets,
             "actions": self.actions,
             "current_slot": self._current_slot,
             "next_slot": self._next_entries[0] if len(self._next_entries) else None,
