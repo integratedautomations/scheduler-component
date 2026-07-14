@@ -7,6 +7,7 @@ import attr
 from homeassistant.core import callback, HomeAssistant
 from homeassistant.loader import bind_hass
 from homeassistant.const import (
+    ATTR_ENTITY_ID,
     ATTR_NAME,
     CONF_CONDITIONS,
 )
@@ -17,7 +18,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DATA_REGISTRY = f"{const.DOMAIN}_storage"
 STORAGE_KEY = f"{const.DOMAIN}.storage"
-STORAGE_VERSION = 3
+STORAGE_VERSION = 5
 SAVE_DELAY = 10
 
 
@@ -26,8 +27,67 @@ class ActionEntry:
     """Action storage Entry."""
 
     service = attr.ib(type=str, default="")
+    # legacy single-entity target, retained only so pre-v5 payloads
+    # (scheduler.add / scheduler.copy service calls, old card versions)
+    # can still be parsed; normalized into `target` before storage
     entity_id = attr.ib(type=str, default=None)
     service_data = attr.ib(type=dict, default={})
+    # HA-style target object:
+    # { entity_id: [], device_id: [], area_id: [], floor_id: [], label_id: [] }
+    # entity membership of device/area/floor/label references is resolved at
+    # execution time (actions.resolve_target), not at save time
+    target = attr.ib(type=dict, default=None)
+    # optional include/exclude entity patterns constraining what the
+    # dynamic parts of `target` may resolve to (see const.ATTR_TARGET_FILTER)
+    target_filter = attr.ib(type=dict, default=None)
+
+
+def normalize_action_target(action: dict) -> dict:
+    """normalize an action dict to carry a canonical target object.
+
+    - wraps a legacy flat `entity_id` (str) into target.entity_id ([str])
+    - coerces scalar target values into lists, drops empty keys
+    - drops the legacy entity_id key once merged into target
+    """
+    action = dict(action)
+    target = dict(action.get(const.ATTR_TARGET) or {})
+
+    # coerce all target values to lists of str, drop empties / unknown keys
+    normalized = {}
+    for key in const.TARGET_KEYS:
+        value = target.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = [value]
+        value = [str(e) for e in value if e]
+        if value:
+            normalized[key] = sorted(set(value))
+
+    # merge legacy flat entity_id into the target object
+    legacy_entity = action.pop(ATTR_ENTITY_ID, None)
+    if legacy_entity:
+        legacy_list = [legacy_entity] if isinstance(legacy_entity, str) else list(legacy_entity)
+        merged = sorted(set(normalized.get(ATTR_ENTITY_ID, []) + legacy_list))
+        normalized[ATTR_ENTITY_ID] = merged
+
+    action[const.ATTR_TARGET] = normalized if normalized else None
+    action[ATTR_ENTITY_ID] = None
+
+    # normalize the target filter: list values, drop empty keys
+    target_filter = dict(action.get(const.ATTR_TARGET_FILTER) or {})
+    normalized_filter = {}
+    for key in [const.ATTR_INCLUDE, const.ATTR_EXCLUDE]:
+        value = target_filter.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = [value]
+        value = [str(e) for e in value if e]
+        if value:
+            normalized_filter[key] = value
+    action[const.ATTR_TARGET_FILTER] = normalized_filter if normalized_filter else None
+    return action
 
 
 @attr.s(slots=True, frozen=True)
@@ -87,7 +147,7 @@ def parse_schedule_data(data: dict):
             if const.ATTR_ACTIONS in item and item[const.ATTR_ACTIONS]:
                 actions = []
                 for action in item[const.ATTR_ACTIONS]:
-                    actions.append(ActionEntry(**action))
+                    actions.append(ActionEntry(**normalize_action_target(action)))
                 timeslot = attr.evolve(timeslot, **{const.ATTR_ACTIONS: actions})
             timeslots.append(timeslot)
         data[const.ATTR_TIMESLOTS] = timeslots
@@ -135,6 +195,33 @@ class MigratableStore(Store):
                     {
                         **entry,
                         const.ATTR_TIMESLOTS: remove_unequal_number_conditions(entry[const.ATTR_TIMESLOTS])
+                    }
+                    for entry in data["schedules"]
+                ]
+                if "schedules" in data
+                else []
+            )
+        if old_version < 5:
+            # v5: actions carry a HA-style target object instead of a flat
+            # entity_id. Wrap legacy entity_id into { entity_id: [...] } and
+            # normalize any pre-existing target dicts (v4) to list values.
+            def migrate_timeslot(timeslot: dict):
+                return {
+                    **timeslot,
+                    const.ATTR_ACTIONS: [
+                        normalize_action_target(action)
+                        for action in timeslot.get(const.ATTR_ACTIONS, [])
+                    ],
+                }
+
+            data["schedules"] = (
+                [
+                    {
+                        **entry,
+                        const.ATTR_TIMESLOTS: [
+                            migrate_timeslot(slot)
+                            for slot in entry.get(const.ATTR_TIMESLOTS, [])
+                        ],
                     }
                     for entry in data["schedules"]
                 ]

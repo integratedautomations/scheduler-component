@@ -124,9 +124,56 @@ CONDITION_SCHEMA = vol.Schema(
     }
 )
 
+ATTR_TARGET = "target"
+ATTR_AREA_ID = "area_id"
+ATTR_DEVICE_ID = "device_id"
+ATTR_FLOOR_ID = "floor_id"
+ATTR_LABEL_ID = "label_id"
+
+# all keys allowed inside an action's target object (HA target selector semantics)
+TARGET_KEYS = [ATTR_ENTITY_ID, ATTR_DEVICE_ID, ATTR_AREA_ID, ATTR_FLOOR_ID, ATTR_LABEL_ID]
+# target keys whose entity membership is resolved at execution time
+DYNAMIC_TARGET_KEYS = [ATTR_DEVICE_ID, ATTR_AREA_ID, ATTR_FLOOR_ID, ATTR_LABEL_ID]
+
+# dispatcher signal fired (debounced) when entity/device/area/floor/label
+# registries change in a way that can affect target resolution
+EVENT_TARGET_REGISTRY_UPDATED = "scheduler_target_registry_updated"
+# debounce window (seconds) for registry change bursts
+TARGET_REGISTRY_UPDATE_DEBOUNCE = 5.0
+
+# optional include/exclude entity patterns stamped into a schedule by the
+# card that created it; applied to indirectly resolved entities (from
+# device/area/floor/label expansion) at execution time, so schedules never
+# control entities the card's configuration excludes
+ATTR_TARGET_FILTER = "target_filter"
+ATTR_INCLUDE = "include"
+ATTR_EXCLUDE = "exclude"
+
+TARGET_FILTER_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_INCLUDE): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_EXCLUDE): vol.All(cv.ensure_list, [cv.string]),
+    }
+)
+
+TARGET_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTITY_ID): vol.All(cv.ensure_list, [cv.entity_id]),
+        vol.Optional(ATTR_DEVICE_ID): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_AREA_ID): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_FLOOR_ID): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_LABEL_ID): vol.All(cv.ensure_list, [cv.string]),
+    }
+)
+
 ACTION_SCHEMA = vol.Schema(
     {
+        # legacy single-entity target, kept for backwards compatibility with
+        # scheduler.add/copy service calls and pre-v5 card versions
         vol.Optional(ATTR_ENTITY_ID): cv.entity_id,
+        # HA-style target object: entities + devices + areas + floors + labels
+        vol.Optional(ATTR_TARGET): TARGET_SCHEMA,
+        vol.Optional(ATTR_TARGET_FILTER): TARGET_FILTER_SCHEMA,
         vol.Required(ATTR_SERVICE): cv.entity_id,
         vol.Optional(ATTR_SERVICE_DATA): dict,
     }
