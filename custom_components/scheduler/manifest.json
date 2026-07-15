@@ -4,9 +4,9 @@
   "codeowners": ["@nielsfaber"],
   "config_flow": true,
   "dependencies": ["http", "websocket_api"],
-  "documentation": "https://github.com/nielsfaber/scheduler-component",
+  "documentation": "https://github.com/integratedautomations/scheduler-component",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/nielsfaber/scheduler-component/issues",
+  "issue_tracker": "https://github.com/integratedautomations/scheduler-component/issues",
   "requirements": [],
-  "version": "v0.0.0"
+  "version": "v4.0.19-ia.1"
 }
