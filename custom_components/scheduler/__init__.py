@@ -31,6 +31,10 @@ from . import const
 from .store import async_get_registry
 from .actions import async_setup_target_listener
 from .websockets import async_register_websockets
+from .entity_schedules import (
+    async_register_entity_schedule_websockets,
+    async_setup_rename_listener,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,12 +67,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # dynamic targets (areas/floors/labels/devices) re-resolve on changes
     hass.data[const.DOMAIN]["target_listener"] = async_setup_target_listener(hass)
 
+    # keep directly targeted entity IDs in sync with entity renames
+    hass.data[const.DOMAIN]["rename_listener"] = async_setup_rename_listener(hass)
+
     if entry.unique_id is None:
         hass.config_entries.async_update_entry(entry, unique_id=coordinator.id)
 
     await hass.config_entries.async_forward_entry_setups(entry, [PLATFORM])
 
     await async_register_websockets(hass)
+    async_register_entity_schedule_websockets(hass)
 
     @callback
     def service_create_schedule(service):
@@ -211,6 +219,9 @@ async def async_unload_entry(hass, entry):
     detach_target_listener = hass.data[const.DOMAIN].pop("target_listener", None)
     if detach_target_listener:
         detach_target_listener()
+    detach_rename_listener = hass.data[const.DOMAIN].pop("rename_listener", None)
+    if detach_rename_listener:
+        detach_rename_listener()
     return unload_ok
 
 

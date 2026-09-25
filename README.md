@@ -193,3 +193,80 @@ See Developer Tools -> Services in HA for available actions and info on valid pa
 | `entity_id`    | string | required          | Entity to which the action needs to be executed    | e.g.: `light.my_lamp`     |
 | `service`      | string | required          | HA service that needs to be executed on the entity | e.g.: `light.turn_on`     |
 | `service_data` | dict   | optional          | Extra parameters to use in the service call.       | e.g.: `{brightness: 200}` |
+
+## Websocket API: schedules for an entity
+
+These commands tell the scheduler-card which schedules act on a given entity, for example when the card is shown inside the more-info dialog.
+
+Membership is computed exactly as execution resolves targets. Each action's stored target (entities, devices, areas, floors, labels) goes through `resolve_target()` with the schedule's `target_filter` and the action's service domain. Results are computed on every request and never cached.
+
+- Group entities are not expanded. A schedule that targets `light.downstairs` matches `light.downstairs`, not the group's members.
+- Explicitly picked entities are never removed by `target_filter`, the same as at execution.
+- If a schedule reaches the entity in several ways, across any of its timeslots and actions, only the most specific reason is returned: `entity` > `device` > `area` > `floor` > `label`.
+- An entity's own area overrides its device's area, as in Home Assistant's service targeting.
+
+### `scheduler/entity_schedules`
+
+Request:
+
+```json
+{ "id": 42, "type": "scheduler/entity_schedules", "entity_id": "light.kitchen" }
+```
+
+Response `result`, a list sorted by schedule name:
+
+```json
+[
+  {
+    "schedule_id": "a1b2c3",
+    "entity_id": "switch.schedule_kitchen_evening",
+    "name": "Kitchen evening",
+    "enabled": true,
+    "next_trigger": "2026-09-24T18:30:00+02:00",
+    "matched_via": { "type": "area", "id": "kitchen", "name": "Kitchen" }
+  }
+]
+```
+
+| Field | Description |
+| --- | --- |
+| `schedule_id` | Schedule ID, as used by `scheduler/item`. |
+| `entity_id` | The schedule's switch entity. Toggle it with `switch.turn_on` / `switch.turn_off`. `null` if the switch is not created yet. |
+| `name` | Schedule name, may be `null`. |
+| `enabled` | Whether the schedule is enabled. |
+| `next_trigger` | ISO timestamp of the next timeslot trigger, or `null`. |
+| `matched_via.type` | One of `entity`, `device`, `area`, `floor`, `label`. |
+| `matched_via.id` | The entity, device, area, floor or label ID that matched. |
+| `matched_via.name` | Display name of that entity, device, area, floor or label. |
+
+An empty list means no schedule acts on the entity. An invalid `entity_id` returns an `invalid_format` error.
+
+### `scheduler/subscribe_entity_schedules`
+
+Request:
+
+```json
+{ "id": 43, "type": "scheduler/subscribe_entity_schedules", "entity_id": "light.kitchen" }
+```
+
+The command first returns an empty `result` message, then pushes an `event` message holding the full list straight away:
+
+```json
+{ "id": 43, "type": "event", "event": { "schedules": [ /* same items as above */ ] } }
+```
+
+A fresh full list is pushed whenever it may have changed:
+
+- a schedule is added, edited, renamed, deleted, enabled or disabled, or its next trigger changes,
+- scheduler storage is reloaded,
+- the entity, device, area, floor or label registry changes in a way that can alter membership or a `matched_via` name.
+
+Bursts of changes are coalesced into one push, sent after a short delay of about 0.25 s. Unsubscribe with the standard command, which removes all listeners:
+
+```json
+{ "id": 44, "type": "unsubscribe_events", "subscription": 43 }
+```
+
+### Entity renames
+
+When an entity ID is renamed in Home Assistant, schedules that target that entity directly are updated to the new ID. The change is saved through the normal schedule edit path. Device, area, floor and label targets need no update, since they are resolved when the schedule runs.
