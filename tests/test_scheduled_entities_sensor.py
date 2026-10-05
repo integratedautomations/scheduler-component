@@ -23,6 +23,7 @@ async def test_sensor_exists_empty(hass, scheduler, world):
     state = hass.states.get(SENSOR)
     assert state is not None
     assert state.state == "0"
+    assert state.attributes["friendly_name"] == "Scheduled entities"
     assert state.attributes["entities"] == {}
 
 
