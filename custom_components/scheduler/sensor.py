@@ -18,6 +18,7 @@ import logging
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 
 from . import const
 from .entity_schedules import (
@@ -51,9 +52,7 @@ class ScheduledEntitiesSensor(SensorEntity):
     def __init__(self, coordinator) -> None:
         self.entity_id = "sensor.scheduled_entities"
         self._attr_unique_id = f"{coordinator.id}_scheduled_entities"
-        # deliberately not attached to the Scheduler device: since HA 2026.9
-        # the friendly name of a device-attached entity is always prefixed
-        # with the device name ("Scheduler Scheduled entities")
+        self._attr_device_info = DeviceInfo(identifiers={(const.DOMAIN, coordinator.id)})
         self._entities: dict = {}
 
     @property

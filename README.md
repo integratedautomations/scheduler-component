@@ -295,7 +295,7 @@ Check an entity in a template:
 
 The sensor uses the same matching as `scheduler/entity_schedules`. Service domain, `target_filter` and group handling all apply. It updates on the same schedule and registry changes, coalesced into one update. It only writes a new state when the list or a count actually changes. Next trigger times are deliberately left out, so the sensor doesn't change every time a timeslot passes.
 
-The sensor is a diagnostic entity named "Scheduled entities". That keeps it off auto-generated dashboards, and schedules targeting an area, floor or label never pick it up. It is not attached to the Scheduler device, because Home Assistant would then display it as "Scheduler Scheduled entities".
+The sensor is a diagnostic entity on the Scheduler device. That keeps it off auto-generated dashboards, and schedules targeting an area, floor or label never pick it up.
 
 **Not recorded.** The `entities` attribute is excluded from the recorder, so it never reaches the history database. It is derived from the schedules, and on large sites it can be tens of kilobytes. Home Assistant has no way for an integration to exclude its own state, so the small count is still recorded. To drop the sensor from history completely, exclude it in `configuration.yaml`:
 
