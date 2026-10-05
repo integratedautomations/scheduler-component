@@ -267,6 +267,45 @@ Bursts of changes are coalesced into one push, sent after a short delay of about
 { "id": 44, "type": "unsubscribe_events", "subscription": 43 }
 ```
 
+### Sensor: `sensor.scheduled_entities`
+
+One sensor lists every entity that a schedule acts on. Use it from cards that can't call websocket commands, such as stock cards, templates, Mushroom or button-card.
+
+- **State:** the number of entities with at least one schedule.
+- **Attribute `entities`:** a map from entity ID to its schedule counts, sorted by entity ID.
+
+```yaml
+state: 2
+attributes:
+  entities:
+    climate.basement_ac_and_heat: { schedules: 2, enabled: 2 }
+    light.kitchen_island: { schedules: 1, enabled: 0 }
+```
+
+| Field | Description |
+| --- | --- |
+| `schedules` | Number of schedules that act on the entity. |
+| `enabled` | How many of those schedules are enabled. |
+
+Check an entity in a template:
+
+```jinja
+{{ 'light.kitchen_island' in state_attr('sensor.scheduled_entities', 'entities') }}
+```
+
+The sensor uses the same matching as `scheduler/entity_schedules`. Service domain, `target_filter` and group handling all apply. It updates on the same schedule and registry changes, coalesced into one update. It only writes a new state when the list or a count actually changes. Next trigger times are deliberately left out, so the sensor doesn't change every time a timeslot passes.
+
+The sensor is a diagnostic entity on the Scheduler device. That keeps it off auto-generated dashboards, and schedules targeting an area, floor or label never pick it up.
+
+**Not recorded.** The `entities` attribute is excluded from the recorder, so it never reaches the history database. It is derived from the schedules, and on large sites it can be tens of kilobytes. Home Assistant has no way for an integration to exclude its own state, so the small count is still recorded. To drop the sensor from history completely, exclude it in `configuration.yaml`:
+
+```yaml
+recorder:
+  exclude:
+    entities:
+      - sensor.scheduled_entities
+```
+
 ### Entity renames
 
 When an entity ID is renamed in Home Assistant, schedules that target that entity directly are updated to the new ID. The change is saved through the normal schedule edit path. Device, area, floor and label targets need no update, since they are resolved when the schedule runs.

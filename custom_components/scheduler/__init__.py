@@ -6,6 +6,7 @@ import homeassistant.util.dt as dt_util
 
 from homeassistant.helpers import config_validation as cv
 from homeassistant.components.switch import DOMAIN as PLATFORM
+from homeassistant.components.sensor import DOMAIN as SENSOR_PLATFORM
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STARTED,
@@ -73,7 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     if entry.unique_id is None:
         hass.config_entries.async_update_entry(entry, unique_id=coordinator.id)
 
-    await hass.config_entries.async_forward_entry_setups(entry, [PLATFORM])
+    await hass.config_entries.async_forward_entry_setups(entry, [PLATFORM, SENSOR_PLATFORM])
 
     await async_register_websockets(hass)
     async_register_entity_schedule_websockets(hass)
@@ -211,7 +212,10 @@ async def async_unload_entry(hass, entry):
     """Unload Scheduler config entry."""
     unload_ok = all(
         await asyncio.gather(
-            *[hass.config_entries.async_forward_entry_unload(entry, PLATFORM)]
+            *[
+                hass.config_entries.async_forward_entry_unload(entry, platform)
+                for platform in (PLATFORM, SENSOR_PLATFORM)
+            ]
         )
     )
     coordinator = hass.data[const.DOMAIN]["coordinator"]

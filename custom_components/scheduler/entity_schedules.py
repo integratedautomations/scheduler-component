@@ -220,6 +220,43 @@ def async_get_entity_schedules(hass: HomeAssistant, entity_id: str) -> list:
 
 
 @callback
+def async_get_scheduled_entities(hass: HomeAssistant) -> dict:
+    """return every entity some schedule acts on, with per-entity counts:
+
+        {entity_id: {"schedules": <total>, "enabled": <enabled>}}
+
+    Same resolution as async_get_entity_schedules (resolve_target() with the
+    action's service domain and target_filter, groups not expanded), done in
+    one pass over all schedules. Sorted by entity_id for a stable attribute.
+    """
+    data = hass.data.get(const.DOMAIN)
+    if not data or "coordinator" not in data:
+        return {}
+    store = data["coordinator"].store
+
+    counts: dict = {}
+    for schedule in store.schedules.values():
+        members = set()
+        for timeslot in schedule.timeslots or []:
+            for action in timeslot.actions or []:
+                target = action.target
+                if not target:
+                    continue
+                service = action.service or ""
+                domain = service.split(".")[0] if service else None
+                members.update(
+                    resolve_target(hass, target, domain, action.target_filter)
+                )
+        for entity_id in members:
+            item = counts.setdefault(entity_id, {"schedules": 0, "enabled": 0})
+            item["schedules"] += 1
+            if schedule.enabled:
+                item["enabled"] += 1
+
+    return {entity_id: counts[entity_id] for entity_id in sorted(counts)}
+
+
+@callback
 def websocket_entity_schedules(hass, connection, msg):
     """one-shot: schedules acting on an entity"""
     connection.send_result(
@@ -239,45 +276,47 @@ def _relevant(event, tracked: set | None) -> bool:
 
 
 @callback
-def websocket_subscribe_entity_schedules(hass, connection, msg):
-    """subscription: push the list now and whenever it may have changed"""
-    entity_id = msg[ATTR_ENTITY_ID]
+def async_track_membership_changes(hass: HomeAssistant, on_change, include_timer: bool = True):
+    """call `on_change()` (coalesced, after a short delay) whenever schedule
+    membership, schedule state or a matched_via name may have changed:
+
+    - schedule add / edit / rename / delete / toggle, storage reload
+    - timer updates (next_trigger), unless include_timer is False
+    - entity/device/area/floor/label registry changes
+
+    Returns a callable that removes all listeners and any pending call.
+    """
     unsubscribers = []
     pending = None
 
     @callback
-    def push(_now=None):
+    def fire(_now=None):
         nonlocal pending
         pending = None
-        connection.send_message(
-            websocket_api.event_message(
-                msg["id"],
-                {"schedules": async_get_entity_schedules(hass, entity_id)},
-            )
-        )
+        on_change()
 
     @callback
-    def schedule_push(*_args):
+    def schedule_fire(*_args):
         nonlocal pending
         if pending is None:
-            pending = async_call_later(hass, SUBSCRIPTION_PUSH_DELAY, push)
+            pending = async_call_later(hass, SUBSCRIPTION_PUSH_DELAY, fire)
 
-    # schedule add / edit / rename / delete / toggle, timer changes
-    # (next_trigger), storage reload
-    for signal in [
+    signals = [
         const.EVENT_ITEM_CREATED,
         const.EVENT_ITEM_UPDATED,
         const.EVENT_ITEM_REMOVED,
-        const.EVENT_TIMER_UPDATED,
         const.EVENT_STARTED,
-    ]:
-        unsubscribers.append(async_dispatcher_connect(hass, signal, schedule_push))
+    ]
+    if include_timer:
+        signals.append(const.EVENT_TIMER_UPDATED)
+    for signal in signals:
+        unsubscribers.append(async_dispatcher_connect(hass, signal, schedule_fire))
 
     def registry_listener(tracked):
         @callback
         def listener(event):
             if _relevant(event, tracked):
-                schedule_push()
+                schedule_fire()
 
         return listener
 
@@ -291,7 +330,7 @@ def websocket_subscribe_entity_schedules(hass, connection, msg):
         unsubscribers.append(hass.bus.async_listen(event_type, registry_listener(tracked)))
 
     @callback
-    def unsubscribe():
+    def detach():
         nonlocal pending
         while unsubscribers:
             unsubscribers.pop()()
@@ -299,7 +338,24 @@ def websocket_subscribe_entity_schedules(hass, connection, msg):
             pending()
             pending = None
 
-    connection.subscriptions[msg["id"]] = unsubscribe
+    return detach
+
+
+@callback
+def websocket_subscribe_entity_schedules(hass, connection, msg):
+    """subscription: push the list now and whenever it may have changed"""
+    entity_id = msg[ATTR_ENTITY_ID]
+
+    @callback
+    def push():
+        connection.send_message(
+            websocket_api.event_message(
+                msg["id"],
+                {"schedules": async_get_entity_schedules(hass, entity_id)},
+            )
+        )
+
+    connection.subscriptions[msg["id"]] = async_track_membership_changes(hass, push)
     connection.send_result(msg["id"])
     push()
 
