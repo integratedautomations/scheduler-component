@@ -185,11 +185,13 @@ def async_get_entity_schedules(hass: HomeAssistant, entity_id: str) -> list:
                 target = action.target
                 if not target:
                     continue
-                if entity_id not in _as_list(target.get(ATTR_ENTITY_ID)):
-                    # explicit entities always resolve; skip the registry
-                    # walk unless the target has dynamic parts
-                    if not any(target.get(key) for key in const.DYNAMIC_TARGET_KEYS):
-                        continue
+                explicit = entity_id in _as_list(target.get(ATTR_ENTITY_ID))
+                # explicit entities always resolve, unless an exclude block
+                # takes them out again; otherwise skip the registry walk
+                # unless the target has dynamic parts
+                if not explicit and not any(target.get(key) for key in const.DYNAMIC_TARGET_KEYS):
+                    continue
+                if not explicit or target.get(const.ATTR_TARGET_EXCLUDE):
                     service = action.service or ""
                     domain = service.split(".")[0] if service else None
                     resolved = resolve_target(hass, target, domain, action.target_filter)
@@ -413,10 +415,12 @@ def async_setup_rename_listener(hass: HomeAssistant):
             for timeslot in schedule[const.ATTR_TIMESLOTS]:
                 for action in timeslot.get(const.ATTR_ACTIONS) or []:
                     target = action.get(const.ATTR_TARGET) or {}
-                    ids = _as_list(target.get(ATTR_ENTITY_ID))
-                    if old_id in ids:
-                        target[ATTR_ENTITY_ID] = [new_id if e == old_id else e for e in ids]
-                        changed = True
+                    # the target itself and its exclude block, if any
+                    for selection in (target, target.get(const.ATTR_TARGET_EXCLUDE) or {}):
+                        ids = _as_list(selection.get(ATTR_ENTITY_ID))
+                        if old_id in ids:
+                            selection[ATTR_ENTITY_ID] = [new_id if e == old_id else e for e in ids]
+                            changed = True
             if changed:
                 _LOGGER.info(
                     "Entity %s renamed to %s, updating schedule %s",

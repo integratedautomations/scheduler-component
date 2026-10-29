@@ -42,17 +42,9 @@ class ActionEntry:
     target_filter = attr.ib(type=dict, default=None)
 
 
-def normalize_action_target(action: dict) -> dict:
-    """normalize an action dict to carry a canonical target object.
-
-    - wraps a legacy flat `entity_id` (str) into target.entity_id ([str])
-    - coerces scalar target values into lists, drops empty keys
-    - drops the legacy entity_id key once merged into target
-    """
-    action = dict(action)
-    target = dict(action.get(const.ATTR_TARGET) or {})
-
-    # coerce all target values to lists of str, drop empties / unknown keys
+def _normalize_target_ids(target: dict) -> dict:
+    """coerce the entity/device/area/floor/label keys of a target (or of its
+    exclude block) to sorted lists of str, dropping empty and unknown keys"""
     normalized = {}
     for key in const.TARGET_KEYS:
         value = target.get(key)
@@ -63,6 +55,22 @@ def normalize_action_target(action: dict) -> dict:
         value = [str(e) for e in value if e]
         if value:
             normalized[key] = sorted(set(value))
+    return normalized
+
+
+def normalize_action_target(action: dict) -> dict:
+    """normalize an action dict to carry a canonical target object.
+
+    - wraps a legacy flat `entity_id` (str) into target.entity_id ([str])
+    - coerces scalar target values into lists, drops empty keys
+    - keeps an `exclude` block (same keys) only while there is something to
+      exclude from, as HA does
+    - drops the legacy entity_id key once merged into target
+    """
+    action = dict(action)
+    target = dict(action.get(const.ATTR_TARGET) or {})
+
+    normalized = _normalize_target_ids(target)
 
     # merge legacy flat entity_id into the target object
     legacy_entity = action.pop(ATTR_ENTITY_ID, None)
@@ -70,6 +78,10 @@ def normalize_action_target(action: dict) -> dict:
         legacy_list = [legacy_entity] if isinstance(legacy_entity, str) else list(legacy_entity)
         merged = sorted(set(normalized.get(ATTR_ENTITY_ID, []) + legacy_list))
         normalized[ATTR_ENTITY_ID] = merged
+
+    exclude = _normalize_target_ids(dict(target.get(const.ATTR_TARGET_EXCLUDE) or {}))
+    if normalized and exclude:
+        normalized[const.ATTR_TARGET_EXCLUDE] = exclude
 
     action[const.ATTR_TARGET] = normalized if normalized else None
     action[ATTR_ENTITY_ID] = None

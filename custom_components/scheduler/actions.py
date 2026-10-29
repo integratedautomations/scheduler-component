@@ -105,10 +105,12 @@ def entity_allowed_by_filter(entity_id: str, target_filter: dict | None) -> bool
 
 def target_is_dynamic(target: dict | None) -> bool:
     """return True if the target contains device/area/floor/label references
-    whose entity membership can change over time"""
+    whose entity membership can change over time (in the target itself or in
+    its exclude block)"""
     if not target:
         return False
-    return any(target.get(key) for key in const.DYNAMIC_TARGET_KEYS)
+    exclude = target.get(const.ATTR_TARGET_EXCLUDE) or {}
+    return any(target.get(key) or exclude.get(key) for key in const.DYNAMIC_TARGET_KEYS)
 
 
 def resolve_target(hass: HomeAssistant, target: dict | None, domain: str = None, target_filter: dict = None) -> list:
@@ -132,10 +134,25 @@ def resolve_target(hass: HomeAssistant, target: dict | None, domain: str = None,
       optional target_filter (include/exclude patterns stamped by the card
       that created the schedule); explicitly picked entity_ids are exempt,
       the picker already vetted those at selection time
+    - an `exclude` block (same keys, HA 2026.11) is expanded the same way
+      and taken out of the result, explicit entities included. Like HA, it
+      removes every entity of an excluded item, whatever its domain. It is
+      resolved here on each run, so it also applies to entities that join an
+      excluded area/label later, on any HA version.
     """
     if not target:
         return []
 
+    resolved = _expand_target(hass, target, domain, target_filter)
+    exclude = target.get(const.ATTR_TARGET_EXCLUDE)
+    if exclude and resolved:
+        resolved -= _expand_target(hass, exclude, None, None)
+    return sorted(resolved)
+
+
+def _expand_target(hass: HomeAssistant, target: dict, domain: str | None, target_filter: dict | None) -> set:
+    """the entity IDs one target selection (or exclude block) references,
+    see resolve_target for the rules"""
     entity_reg = er.async_get(hass)
     device_reg = dr.async_get(hass)
     area_reg = ar.async_get(hass)
@@ -210,7 +227,7 @@ def resolve_target(hass: HomeAssistant, target: dict | None, domain: str = None,
                 continue
             resolved.add(entry.entity_id)
 
-    return sorted(resolved)
+    return resolved
 
 
 def expand_action_target(hass: HomeAssistant, action: dict) -> list:

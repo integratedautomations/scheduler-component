@@ -194,6 +194,24 @@ See Developer Tools -> Services in HA for available actions and info on valid pa
 | `service`      | string | required          | HA service that needs to be executed on the entity | e.g.: `light.turn_on`     |
 | `service_data` | dict   | optional          | Extra parameters to use in the service call.       | e.g.: `{brightness: 200}` |
 
+#### Excluding items from a target
+
+An action's `target` can leave entities, devices, areas, floors and labels out again, matching the **Exclude target** option in Home Assistant 2026.11. Add an `exclude` block with the same keys as the target itself:
+
+```yaml
+target:
+  floor_id: ground_floor
+  exclude:
+    area_id: kitchen
+    entity_id: light.hallway_night_light
+```
+
+- The exclusion is worked out every time the schedule runs. A light added to the kitchen later is left out as well.
+- An exclusion takes out every entity of the item, whatever its domain. This includes entities listed explicitly in the target.
+- An exclusion that doesn't match anything has no effect.
+- An `exclude` block on its own, without anything to exclude from, is dropped. An `exclude` block can't contain another `exclude`.
+- The scheduler resolves exclusions itself, so they also work on Home Assistant versions before 2026.11. Only the editor option in the target picker needs 2026.11.
+
 ## Websocket API: schedules for an entity
 
 These commands tell the scheduler-card which schedules act on a given entity, for example when the card is shown inside the more-info dialog.
@@ -204,6 +222,7 @@ Membership is computed exactly as execution resolves targets. Each action's stor
 - Explicitly picked entities are never removed by `target_filter`, the same as at execution.
 - If a schedule reaches the entity in several ways, across any of its timeslots and actions, only the most specific reason is returned: `entity` > `device` > `area` > `floor` > `label`.
 - An entity's own area overrides its device's area, as in Home Assistant's service targeting.
+- A target's `exclude` block is applied, so an excluded entity doesn't match, even if it's listed explicitly.
 
 ### `scheduler/entity_schedules`
 
@@ -308,4 +327,4 @@ recorder:
 
 ### Entity renames
 
-When an entity ID is renamed in Home Assistant, schedules that target that entity directly are updated to the new ID. The change is saved through the normal schedule edit path. Device, area, floor and label targets need no update, since they are resolved when the schedule runs.
+When an entity ID is renamed in Home Assistant, schedules that target that entity directly, or exclude it directly, are updated to the new ID. The change is saved through the normal schedule edit path. Device, area, floor and label targets need no update, since they are resolved when the schedule runs.

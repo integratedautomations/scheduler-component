@@ -156,13 +156,23 @@ TARGET_FILTER_SCHEMA = vol.Schema(
     }
 )
 
+TARGET_ID_FIELDS = {
+    vol.Optional(ATTR_ENTITY_ID): vol.All(cv.ensure_list, [cv.entity_id]),
+    vol.Optional(ATTR_DEVICE_ID): vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional(ATTR_AREA_ID): vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional(ATTR_FLOOR_ID): vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional(ATTR_LABEL_ID): vol.All(cv.ensure_list, [cv.string]),
+}
+
+# a target may leave things out again (HA 2026.11 "Exclude target"): an
+# `exclude` block with the same keys, which can't itself hold an exclude.
+# Resolved by actions.resolve_target, so it works on any HA version.
+ATTR_TARGET_EXCLUDE = "exclude"
+TARGET_EXCLUDE_SCHEMA = vol.Schema(TARGET_ID_FIELDS)
 TARGET_SCHEMA = vol.Schema(
     {
-        vol.Optional(ATTR_ENTITY_ID): vol.All(cv.ensure_list, [cv.entity_id]),
-        vol.Optional(ATTR_DEVICE_ID): vol.All(cv.ensure_list, [cv.string]),
-        vol.Optional(ATTR_AREA_ID): vol.All(cv.ensure_list, [cv.string]),
-        vol.Optional(ATTR_FLOOR_ID): vol.All(cv.ensure_list, [cv.string]),
-        vol.Optional(ATTR_LABEL_ID): vol.All(cv.ensure_list, [cv.string]),
+        **TARGET_ID_FIELDS,
+        vol.Optional(ATTR_TARGET_EXCLUDE): TARGET_EXCLUDE_SCHEMA,
     }
 )
 
